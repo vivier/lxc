@@ -122,10 +122,12 @@ EOF
     # reconfigure some services
 
     # remove pointless services in a container
-    chroot $rootfs /usr/sbin/update-rc.d -f checkroot.sh disable
-    chroot $rootfs /usr/sbin/update-rc.d -f umountfs disable
-    chroot $rootfs /usr/sbin/update-rc.d -f hwclock.sh disable
-    chroot $rootfs /usr/sbin/update-rc.d -f hwclockfirst.sh disable
+    if [ -x "$rootfs/usr/sbin/update-rc.d" ] ; then
+        chroot $rootfs /usr/sbin/update-rc.d -f checkroot.sh disable
+        chroot $rootfs /usr/sbin/update-rc.d -f umountfs disable
+        chroot $rootfs /usr/sbin/update-rc.d -f hwclock.sh disable
+        chroot $rootfs /usr/sbin/update-rc.d -f hwclockfirst.sh disable
+    fi
 
     # generate new SSH keys
     if [ -x $rootfs/var/lib/dpkg/info/openssh-server.postinst ]; then
@@ -310,7 +312,6 @@ ifupdown,\
 locales,\
 libui-dialog-perl,\
 dialog,\
-isc-dhcp-client,\
 netbase,\
 net-tools,\
 iproute,\
@@ -324,6 +325,15 @@ openssh-server
 
     trap cleanup EXIT SIGHUP SIGINT SIGTERM
 
+    case $release in
+        "etch"|"lenny")
+            packages=$packages,dhcp3-client
+            ;;
+        *)
+            packages=$packages,isc-dhcp-client
+            ;;
+    esac
+
     # Create the cache
     mkdir -p "$cache"
 
@@ -332,6 +342,12 @@ openssh-server
     if [ ! -f $releasekeyring ]; then
         releasekeyring="$cache/archive-key.gpg"
         case $release in
+            "etch")
+                gpgkeyname="archive-key-4.0"
+                ;;
+            "lenny")
+                gpgkeyname="archive-key-5.0"
+                ;;
             "squeeze")
                 gpgkeyname="archive-key-6.0"
                 ;;
@@ -738,7 +754,7 @@ fi
 
 current_release=`wget ${MIRROR}/dists/stable/Release -O - 2> /dev/null | head |awk '/^Codename: (.*)$/ { print $2; }'`
 release=${release:-${current_release}}
-valid_releases=('wheezy' 'jessie' 'stretch' 'sid')
+valid_releases=('etch' 'lenny' 'squeeze' 'wheezy' 'jessie' 'stretch' 'sid')
 if [[ ! "${valid_releases[*]}" =~ (^|[^[:alpha:]])$release([^[:alpha:]]|$) ]]; then
     echo "Invalid release ${release}, valid ones are: ${valid_releases[*]}"
     exit 1
