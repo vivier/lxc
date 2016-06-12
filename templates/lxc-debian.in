@@ -310,7 +310,6 @@ download_debian()
 $init,\
 ifupdown,\
 locales,\
-libui-dialog-perl,\
 dialog,\
 netbase,\
 net-tools,\
@@ -326,11 +325,14 @@ openssh-server
     trap cleanup EXIT SIGHUP SIGINT SIGTERM
 
     case $release in
-        "etch"|"lenny")
+        "etch"|"etch-m68k")
             packages=$packages,dhcp3-client
             ;;
+        "etch"|"etch-m68k"|"lenny")
+            packages=$packages,dhcp3-client,libui-dialog-perl
+            ;;
         *)
-            packages=$packages,isc-dhcp-client
+            packages=$packages,isc-dhcp-client,libui-dialog-perl
             ;;
     esac
 
@@ -342,7 +344,7 @@ openssh-server
     if [ ! -f $releasekeyring ]; then
         releasekeyring="$cache/archive-key.gpg"
         case $release in
-            "etch")
+            "etch"|"etch-m68k")
                 gpgkeyname="archive-key-4.0"
                 ;;
             "lenny")
@@ -379,7 +381,7 @@ openssh-server
             return 1
         fi
     else
-        debootstrap --foreign --verbose --variant=minbase --arch=$arch \
+        debootstrap --foreign --no-check-gpg --verbose --variant=minbase --arch=$arch \
             --include=$packages --keyring=${releasekeyring} \
             "$release" "$cache/partial-$release-$arch" $MIRROR
         if [ $? -ne 0 ]; then
@@ -754,7 +756,7 @@ fi
 
 current_release=`wget ${MIRROR}/dists/stable/Release -O - 2> /dev/null | head |awk '/^Codename: (.*)$/ { print $2; }'`
 release=${release:-${current_release}}
-valid_releases=('etch' 'lenny' 'squeeze' 'wheezy' 'jessie' 'stretch' 'sid')
+valid_releases=('etch' 'etch-m68k' 'lenny' 'squeeze' 'wheezy' 'jessie' 'stretch' 'sid')
 if [[ ! "${valid_releases[*]}" =~ (^|[^[:alpha:]])$release([^[:alpha:]]|$) ]]; then
     echo "Invalid release ${release}, valid ones are: ${valid_releases[*]}"
     exit 1
