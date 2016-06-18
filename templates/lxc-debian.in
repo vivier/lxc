@@ -372,6 +372,8 @@ openssh-server
 
     # download a mini debian into a cache
     echo "Downloading debian minimal ..."
+    old_LANG=$LANG
+    unset LANG
     if [ "$interpreter" = "" ] ; then
         debootstrap --verbose --variant=minbase --arch=$arch \
             --include=$packages --keyring=${releasekeyring} \
@@ -400,6 +402,7 @@ openssh-server
             return 1
         fi
     fi
+    LANG=$old_LANG
 
     mv "$1/partial-$release-$arch" "$1/rootfs-$release-$arch"
     echo "Download complete."
@@ -557,12 +560,15 @@ EOF
         write_sourceslist ${rootfs} ${release}
     fi
 
+    old_LANG=$LANG
+    unset LANG
     # Install Packages in container
     if [ -n "${packages}" ]; then
         local pack_list="`echo ${packages} | sed 's/,/ /g'`"
         echo "Installing packages: ${pack_list}"
         install_packages ${rootfs} ${pack_list}
     fi
+    LANG=$old_LANG
 
     # Re-enable service startup
     rm ${rootfs}/usr/sbin/policy-rc.d
@@ -830,6 +836,8 @@ else
     num_tty=4
 fi
 
+old_LANG=$LANG
+unset LANG
 install_debian $rootfs $release $arch $LXC_CACHE_PATH "$interpreter" "$interpreter_path" $flushcache
 if [ $? -ne 0 ]; then
     echo "failed to install debian"
@@ -849,6 +857,7 @@ if [ $? -ne 0 ]; then
 fi
 
 configure_debian_systemd $path $rootfs $config $num_tty
+LANG=$old_LANG
 
 post_process ${rootfs} ${release} ${arch} ${hostarch} "${interpreter}" ${packages}
 
