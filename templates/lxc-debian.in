@@ -584,7 +584,46 @@ EOF
         chroot $rootfs locale-gen $LANG $encoding
         chroot $rootfs update-locale LANG=$LANG
     fi
+
     # end
+}
+
+do_bindhome()
+{
+    rootfs=$1
+    user=$2
+
+    # copy /etc/passwd, /etc/shadow, and /etc/group entries into container
+    pwd=$(getent passwd $user) || { echo "Failed to copy password entry for $user"; false; }
+    echo $pwd >> $rootfs/etc/passwd
+
+    # make sure user's shell exists in the container
+    shell=$(echo $pwd | cut -d: -f 7)
+    if [ ! -x $rootfs/$shell ]; then
+        echo "shell $shell for user $user was not found in the container."
+        pkg=$(dpkg -S $(readlink -m $shell) | cut -d ':' -f1)
+        echo "Installing $pkg"
+        install_packages $rootfs $pkg
+    fi
+
+    shad=$(getent shadow $user)
+    echo "$shad" >> $rootfs/etc/shadow
+
+    # bind-mount the user's path into the container's /home
+    h=$(getent passwd $user | cut -d: -f 6)
+    mkdir -p $rootfs/$h
+
+    # use relative path in container
+    h2=${h#/}
+    while [ ${h2:0:1} = "/" ]; do
+        h2=${h2#/}
+    done
+    echo "lxc.mount.entry = $h $h2 none bind 0 0" >> $path/config
+
+    # Make sure the group exists in container
+    grp=$(echo $pwd | cut -d: -f 4) # group number for $user
+    grpe=$(getent group $grp) || return 0  # if host doesn't define grp, ignore in container
+    chroot $rootfs getent group "$grpe" || echo "$grpe" >> $rootfs/etc/group
 }
 
 clean()
@@ -621,7 +660,7 @@ Usage: $1 -h|--help -p|--path=<path> [-c|--clean] [-a|--arch=<arch>] [-r|--relea
                                      [--mirror=<mirror>] [--security-mirror=<security mirror>]
                                      [--package=<package_name1,package_name2,...>]
                                      [-I|--interpreter-path=<interpreter path>]
-                                     [-F | --flush-cache]
+                                     [-F | --flush-cache] [-b|--bindhome <user>]
 
 Options :
 
@@ -643,6 +682,8 @@ Options :
   -I|--interpreter-path=INTERPRETER-PATH
                          Path of the binfmt interpreter to copy to the rootfs
   -F | --flush-cache     Flush the debian release cache
+  -b|--bindhome <user>   bind <user>'s home into the container
+                         several instances allow to bind several users
 
 Environment variables:
 
@@ -655,7 +696,7 @@ EOF
     return 0
 }
 
-options=$(getopt -o hp:n:a:r:cI:F -l arch:,clean,help,enable-non-free,mirror:,name:,packages:,path:,release:,rootfs:,security-mirror:,interpreter-path:,flush-cache -- "$@")
+options=$(getopt -o hp:n:a:r:cI:Fb: -l arch:,clean,help,enable-non-free,mirror:,name:,packages:,path:,release:,rootfs:,security-mirror:,interpreter-path:,flush-cache,bindhome: -- "$@")
 if [ $? -ne 0 ]; then
         usage $(basename $0)
         exit 1
@@ -673,6 +714,7 @@ fi
 hostarch=$arch
 mainonly=1
 flushcache=0
+bindhome=
 
 while true
 do
@@ -693,6 +735,7 @@ do
            --rootfs)          rootfs=$2; shift 2;;
            --security-mirror) SECURITY_MIRROR=$2; shift 2;;
         -F|--flush-cache)     flushcache=1; shift 1;;
+        -b|--bindhome)        bindhome="$bindhome $2"; shift 2;;
         *)                    break ;;
     esac
 done
@@ -701,6 +744,14 @@ if [ ! -z "$clean" -a -z "$path" ]; then
     clean || exit 1
     exit 0
 fi
+
+for login in $bindhome; do
+    pwd=$(getent passwd $login)
+    if [ $? -ne 0 ]; then
+        echo "Error: no password entry found for $login"
+        exit 1
+    fi
+done
 
 if [ "$arch" = "i686" ]; then
     arch=i386
@@ -800,6 +851,10 @@ fi
 configure_debian_systemd $path $rootfs $config $num_tty
 
 post_process ${rootfs} ${release} ${arch} ${hostarch} "${interpreter}" ${packages}
+
+for login in $bindhome; do
+    do_bindhome $rootfs $login
+done
 
 if [ ! -z "$clean" ]; then
     clean || exit 1
