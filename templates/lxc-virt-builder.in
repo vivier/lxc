@@ -1,0 +1,284 @@
+#!/bin/bash
+
+# templates scripts for generating container user virt-builder
+# virt-builder allows to create container for a given list of
+# distro/architecture
+#
+# Copyright © 2016 Laurent Vivier <laurent@vivier.eu>
+#
+#  This library is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2.1 of the License, or (at your option) any later version.
+
+#  This library is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+#  Lesser General Public License for more details.
+
+#  You should have received a copy of the GNU Lesser General Public
+#  License along with this library; if not, write to the Free Software
+#  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+#  USA
+
+# Detect use under userns (unsupported)
+for arg in "$@"; do
+    [ "$arg" = "--" ] && break
+    if [ "$arg" = "--mapped-uid" -o "$arg" = "--mapped-gid" ]; then
+        echo "This template can't be used for unprivileged containers." 1>&2
+        echo "You may want to try the \"download\" template instead." 1>&2
+        exit 1
+    fi
+done
+
+set -e
+
+STATE_DIR="@LOCALSTATEDIR@"
+HOOK_DIR="@LXCHOOKDIR@"
+LXC_TEMPLATE_CONFIG="@LXCTEMPLATECONFIG@"
+# Allows the lxc-cache directory to be set by environment variable
+LXC_CACHE_PATH=${LXC_CACHE_PATH:-"$LOCALSTATEDIR/cache/lxc"}
+
+# Make sure the usual locations are in PATH
+export PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ -r /etc/default/lxc ]; then
+    . /etc/default/lxc
+fi
+
+find_interpreter()
+{
+    given_interpreter=$(basename "$1")
+
+    if [ ! -d /proc/sys/fs/binfmt_misc/ ] ; then
+        return 1
+    fi
+    for file in /proc/sys/fs/binfmt_misc/* ; do
+        if [ "$file" = "/proc/sys/fs/binfmt_misc/register" -o \
+             "$file" = "/proc/sys/fs/binfmt_misc/status" ] ; then
+            continue
+        fi
+        interpreter_path=$(sed -n "/^interpreter/s/interpreter \([^[:space:]]*\)/\1/p" "$file")
+        interpreter=$(basename $interpreter_path)
+
+        if [ "$given_interpreter" = "$interpreter" ] ; then
+            echo "$interpreter_path"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_os()
+{
+    rootfs=$1
+    arch=$2
+    osversion=$3
+    name=$4
+    interpreter="$5"
+    interpreter_path="$6"
+
+    virt-builder --arch "$arch" "$osversion" \
+                 --hostname $name -o "$LXC_CACHE_PATH/$name.img"  \
+                 --cache "$LXC_CACHE_PATH/virt-builder"
+
+    echo "Extracting files"
+
+    cd "$rootfs"
+    if ! virt-tar-out -a "$LXC_CACHE_PATH/$name.img" / - | tar xf - ; then
+        echo "Cannot create $rootfs"
+        exit 1
+    fi
+    cd -
+
+    # copy interpreter
+
+    if [ "$interpreter" != "" ] ; then
+        mkdir -p $(dirname "$rootfs/$interpreter_path")
+
+        if ! cp "$interpreter" "$rootfs/$interpreter_path"; then
+            echo "Cannot copy $interpreter"
+            exit 1
+        fi
+    fi
+
+    rm -f "$LXC_CACHE_PATH/$name.img"
+}
+
+copy_configuration()
+{
+    path=$1
+    rootfs=$2
+    hostname=$3
+    arch=$4
+    num_tty=$5
+
+    # Generate the configuration file
+    # if there is exactly one veth network entry, make sure it has an
+    # associated hwaddr.
+    nics=`grep -e '^lxc\.network\.type[ \t]*=[ \t]*veth' $path/config | wc -l`
+    if [ $nics -eq 1 ]; then
+        grep -q "^lxc.network.hwaddr" $path/config || sed -i -e "/^lxc\.network\.type[ \t]*=[ \t]*veth/a lxc.network.hwaddr = 00:16:3e:$(openssl rand -hex 3| sed 's/\(..\)/\1:/g; s/.$//')" $path/config
+    fi
+
+    ## Add all the includes
+    echo "" >> $path/config
+    echo "# Common configuration" >> $path/config
+    if [ -e "${LXC_TEMPLATE_CONFIG}/debian.common.conf" ]; then
+        echo "lxc.include = ${LXC_TEMPLATE_CONFIG}/debian.common.conf" >> $path/config
+    fi
+    if [ -e "${LXC_TEMPLATE_CONFIG}/debian.${release}.conf" ]; then
+        echo "lxc.include = ${LXC_TEMPLATE_CONFIG}/debian.${release}.conf" >> $path/config
+    fi
+
+    ## Add the container-specific config
+    echo "" >> $path/config
+    echo "# Container specific configuration" >> $path/config
+    grep -q "^lxc.rootfs" $path/config 2> /dev/null || echo "lxc.rootfs = $rootfs" >> $path/config
+
+    cat <<EOF >> $path/config
+lxc.tty = $num_tty
+lxc.utsname = $hostname
+lxc.arch = $arch
+lxc.pts=1023
+EOF
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to add configuration"
+        return 1
+    fi
+
+    return 0
+}
+
+
+config_os()
+{
+    rootfs=$1
+    osversion=$2
+
+    case $osversion in
+    fedora-21)
+        chroot $rootfs rpm -e plymouth plymouth-scripts 2> /dev/null
+        rm $rootfs/etc/systemd/system/multi-user.target.wants/auditd.service
+        mv $rootfs/etc/sysconfig/network-scripts/ifcfg-enp0s1 \
+           $rootfs/etc/sysconfig/network-scripts/ifcfg-eth0 
+        sed -i "s/enp0s1/eth0/" $rootfs/etc/sysconfig/network-scripts/ifcfg-eth0
+        echo "NM_CONTROLLED=no" >> $rootfs/etc/sysconfig/network-scripts/ifcfg-eth0
+        chroot $rootfs /sbin/chkconfig network on
+        ;;
+    esac
+}
+
+usage()
+{
+    cat <<EOF
+$1 [-h|--help][-a|--arch <arch>][--os-version|-o <os-version>]
+   [-p|--path][--rootfs <rootfs>][--list|-l][-d|--debug]
+   [-I|--interpreter-path=<interpreter path>]
+
+  -h, --help         print this help text
+  -p, --path=PATH    directory where config and rootfs of this VM will be kept
+  -a, --arch=ARCH    the container architecture (e.g. amd64):
+                     default to host arch
+  -o, --os-version=OS-VERSION
+                     the OS version to install
+  -l, --list         the list of available os-version/architecture pairs 
+                     to install
+
+  -I|--interpreter-path=INTERPRETER-PATH
+                         Path of the binfmt interpreter to copy to the rootfs
+EOF
+    return 0
+}
+
+options=$(getopt -o hp:a:o:liI:dn: -l help,path:,arch:,os-version:,list,debug,interpreter-path:,name:,rootfs: -- "$@")
+if [ $? -ne 0 ]; then
+    usage $(basename $0)
+    exit 1
+fi
+eval set -- "$options"
+
+debug=0
+arch=
+osversion=
+interpreter=""
+name=
+path=
+roofs=
+
+while true ; do
+    case "$1" in
+    -h|--help)       usage $0 && exit 0;;
+    --rootfs)        rootfs=$2; shift 2;;
+    -a|--arch)       arch=$2; shift 2;;
+    -o|--os-version) osversion=$2; shift 2;;
+    -d|--debug)      debug=1; shift 1;;
+    -I|--interpreter-path)
+                     interpreter="$2"; shift 2;;
+    -p|--path)       path="$2"; shift 2;;
+    -n|--name)       name="$2"; shift 2;;
+    *)               break ;;
+    esac
+done
+
+if [ $debug -eq 1 ]; then
+    set -x
+fi
+
+which virt-builder > /dev/null || { echo "'virt-builder' command is missing" >&2; false; }
+
+if [ -z "$path" ]; then
+    echo "'path' parameter is required"
+    exit 1
+fi
+
+if [ "$interpreter" != "" ] ; then
+    if ! file -b "${interpreter}" |grep -q "statically linked" ; then
+        echo "'${interpreter}' must be statically linked" 1>&2
+        exit 1
+    fi
+    interpreter_path=$(find_interpreter "$interpreter")
+    if [ $? -ne 0 ] ; then
+        echo "no binfmt interpreter using $(basename $interpreter)" 1>&2
+        exit 1
+    fi
+fi
+
+if [ "$(id -u)" != "0" ]; then
+    echo "This script should be run as 'root'"
+    exit 1
+fi
+
+# detect rootfs
+config="$path/config"
+if [ -z "$rootfs" ]; then
+    if grep -q '^lxc.rootfs' $config 2> /dev/null ; then
+        rootfs=$(awk -F= '/^lxc.rootfs[ \t]+=/{ print $2 }' $config)
+    else
+        rootfs=$path/rootfs
+    fi
+fi
+
+# determine the number of ttys - default is 4
+if grep -q '^lxc.tty' $config 2> /dev/null ; then
+    num_tty=$(awk -F= '/^lxc.tty[ \t]+=/{ print $2 }' $config)
+else
+    num_tty=4
+fi
+
+if ! install_os $rootfs $arch $osversion $name \
+                "$interpreter" "$interpreter_path" ; then
+    echo "failed write configuration file"
+    exit 1
+fi
+
+if ! copy_configuration $path $rootfs $name $arch $num_tty ; then
+    echo "failed write configuration file"
+    exit 1
+fi
+
+if ! config_os $rootfs $osversion ; then
+    echo "failed to configure os $osversion"
+    exit 1
+fi

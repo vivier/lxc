@@ -839,6 +839,7 @@ AC_CONFIG_FILES([
 	templates/lxc-ubuntu
 	templates/lxc-ubuntu-cloud
 	templates/lxc-sparclinux
+	templates/lxc-virt-builder
 
 	src/Makefile
 	src/lxc/Makefile
